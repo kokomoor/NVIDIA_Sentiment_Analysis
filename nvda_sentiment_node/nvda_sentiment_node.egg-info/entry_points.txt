@@ -1,0 +1,2 @@
+[console_scripts]
+nvda-sentiment = nvda_sentiment.node:cli
