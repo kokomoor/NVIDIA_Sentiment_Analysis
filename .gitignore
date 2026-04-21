@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Caches
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Durable history DB — don't commit accumulated run data
+data/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Env files (keep .env.example, ignore real .env)
+.env
