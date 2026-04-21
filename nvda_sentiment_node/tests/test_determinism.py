@@ -8,7 +8,12 @@ from typing import List
 
 from nvda_sentiment.config import Settings
 from nvda_sentiment.node import NVDASentimentNode
-from nvda_sentiment.schemas import SentimentRequest, SourceDocument
+from nvda_sentiment.schemas import (
+    InvestorBranchOutput,
+    InvestorSubScore,
+    SentimentRequest,
+    SourceDocument,
+)
 
 
 _TEXT_A = """Item 2. Management's Discussion and Analysis
@@ -48,9 +53,27 @@ class FakeIR:
         raise RuntimeError("should not be called")
 
 
-class FakeMarket:
-    def get_combined_score(self):
-        return (0.1, True)
+class FakeInvestorBranch:
+    """Deterministic stub — returns one always-ok broad_market sub-score."""
+
+    def set_use_cache(self, use_cache):
+        return None
+
+    def run(self, *, include_broad_market):
+        subs = []
+        if include_broad_market:
+            subs.append(
+                InvestorSubScore(
+                    name="broad_market", score=0.1, ok=True, detail={"stub": True}
+                )
+            )
+        comp = subs[0].score if subs else 0.0
+        return InvestorBranchOutput(
+            sub_scores=subs,
+            investor_component=comp,
+            investor_score=50.0 + 50.0 * comp,
+            ok=bool(subs),
+        )
 
 
 def _make_node(tmp_path):
@@ -67,7 +90,7 @@ def _make_node(tmp_path):
         settings=settings,
         sec_adapter=FakeSEC(docs, html_map),
         ir_adapter=FakeIR(),
-        market_context=FakeMarket(),
+        investor_branch=FakeInvestorBranch(),
     )
 
 

@@ -14,10 +14,11 @@ def build_signals(
     tone_delta: float,
     risk_delta: float,
     guidance_tone: float,
-    investor_context: float,
     document_scores: List[DocumentScore],
     section_scores_by_type: Dict[str, List[SectionScore]],
-    include_market_context: bool = True,
+    investor_component: float = 0.0,
+    divergence: float = 0.0,
+    include_investor_branch: bool = False,
 ) -> List[str]:
     signals: List[str] = []
 
@@ -66,14 +67,24 @@ def build_signals(
             signals.append("Analyst Q&A tone ran above prepared remarks — management handled pushback well")
         # else: skip (§29.2 tier 5)
 
-    # Tier 6 — Investor context
-    if include_market_context:
-        if investor_context >= 0.10:
-            signals.append("Broader investor risk appetite is supportive")
-        elif investor_context <= -0.10:
-            signals.append("Broader investor risk appetite is cautious")
+    # Tier 6 — Investor positioning (§6.5.3)
+    if include_investor_branch:
+        if investor_component >= 0.10:
+            signals.append("Market positioning is bullish")
+        elif investor_component <= -0.10:
+            signals.append("Market positioning is bearish")
         else:
-            signals.append("Broader investor risk appetite is neutral")
+            signals.append("Market positioning is neutral")
 
-    # §29.3 cap at 6
-    return signals[:6]
+    # Tier 7 — Divergence (§6.5.3)
+    if include_investor_branch:
+        abs_div = abs(divergence)
+        if abs_div < 10:
+            signals.append("Leadership and market signals are aligned")
+        elif divergence > 20:
+            signals.append("Expectations gap: management bullish while market skeptical")
+        elif divergence < -20:
+            signals.append("Expectations gap: management cautious while market optimistic")
+
+    # §6.5.3 cap at 8 (was 6)
+    return signals[:8]

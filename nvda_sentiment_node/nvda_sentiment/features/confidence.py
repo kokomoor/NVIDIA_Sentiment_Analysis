@@ -1,4 +1,4 @@
-"""Confidence score (§28)."""
+"""Confidence score (§28, §6.5.2)."""
 
 from __future__ import annotations
 
@@ -21,6 +21,9 @@ def compute_confidence(
     guidance_tone_source_count: int,
     filing_delta_computed: bool,
     yoy_matched: bool,
+    include_investor_branch: bool = False,
+    investor_branch_ok: bool = False,
+    investor_subsources_ok: int = 0,
 ) -> float:
     # §28.5 — no scorable documents short-circuit
     if len(document_scores) == 0:
@@ -57,17 +60,25 @@ def compute_confidence(
     # Filing delta against YoY-matched comparison
     additions += _add(yoy_matched, 0.05)
 
-    # Investor context retrieved
+    # Investor context retrieved (broad_market / legacy alias)
     additions += _add(investor_context_available, 0.05)
 
-    # Cap additions at 0.40 (§28.2)
+    # §6.5.2 — investor-branch sub-source bonuses.
+    if investor_subsources_ok >= 3:
+        additions += 0.05
+    elif investor_subsources_ok >= 1:
+        additions += 0.02
+
+    # Cap additions at 0.40 (§28.2 invariant).
     additions = min(additions, 0.40)
     confidence += additions
 
-    # Penalties (§28.3)
+    # Penalties (§28.3, §6.5.2)
     if not filing_delta_computed:
         confidence -= 0.05
     if include_market_context and not investor_context_available:
+        confidence -= 0.05
+    if include_investor_branch and not investor_branch_ok:
         confidence -= 0.05
 
     total_fetch_attempts = len(fetched_docs) + fetch_failures

@@ -1,25 +1,28 @@
-"""NVDASentimentNode orchestration + Typer CLI (§§33, 39, 43)."""
+"""NVDASentimentNode orchestration + Typer CLI (§§33, 39, 43, 6.6, 6.7)."""
 
 from __future__ import annotations
 
-import json
+import warnings as _warnings
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Dict, List, Tuple
 
 import typer
 
-from .adapters.market_context import MarketContextAdapter
 from .adapters.nvidia_ir import NvidiaIRAdapter
 from .adapters.sec_api import SECAdapter
 from .config import Settings
+from .features.combiner import CombinerOutput, combine
 from .features.confidence import compute_confidence
 from .features.filing_delta import compute_filing_delta
+from .features.investor_branch import InvestorBranch
 from .features.signal_builder import build_signals
 from .parsers.html_to_text import html_to_clean_text
 from .parsers.section_extractor import SectionExtractor
 from .schemas import (
     DocumentScore,
+    InvestorBranchOutput,
+    InvestorSubScore,
     SectionScore,
     SentimentRequest,
     SentimentResponse,
@@ -27,8 +30,9 @@ from .schemas import (
 )
 from .scorers.composite import (
     compute_filing_tone,
-    compute_final_score,
     compute_guidance_tone,
+    compute_leadership_component,
+    map_score_to_label,
     score_document,
 )
 from .scorers.finbert_scorer import FinBERTScorer
@@ -48,9 +52,6 @@ def _deduplicate(docs: List[SourceDocument]) -> List[SourceDocument]:
     seen_url: set[str] = set()
     seen_title_date: set[Tuple[str, str]] = set()
     result: List[SourceDocument] = []
-    # Priority: IR transcripts/commentary first for transcript-like sources,
-    # SEC first for official filings (§34.3). We approximate by keeping insertion
-    # order deterministic and preferring the earlier-added item.
     for doc in docs:
         if doc.url and doc.url in seen_url:
             continue
@@ -92,6 +93,13 @@ def _build_source_coverage(docs: List[SourceDocument]) -> Dict[str, int]:
     return counts
 
 
+def _get_sub(ib: InvestorBranchOutput, name: str) -> float:
+    for sub in ib.sub_scores:
+        if sub.name == name:
+            return round(float(sub.score), 3)
+    return 0.0
+
+
 # --------------------------------------------------------------------------- #
 # The node
 # --------------------------------------------------------------------------- #
@@ -106,15 +114,34 @@ class NVDASentimentNode:
         *,
         sec_adapter: SECAdapter | None = None,
         ir_adapter: NvidiaIRAdapter | None = None,
-        market_context: MarketContextAdapter | None = None,
+        investor_branch: InvestorBranch | None = None,
         section_extractor: SectionExtractor | None = None,
         section_scorer: SectionScorer | None = None,
+        market_context=None,  # deprecated — see §6.6.1
     ):
         configure_logging()
         self.settings = settings or Settings()
         self.sec_adapter = sec_adapter or SECAdapter(self.settings)
         self.ir_adapter = ir_adapter or NvidiaIRAdapter(self.settings)
-        self.market_context = market_context or MarketContextAdapter(self.settings)
+
+        if investor_branch is not None and market_context is not None:
+            raise ValueError(
+                "Pass either `investor_branch=` (preferred) or the deprecated "
+                "`market_context=`, not both."
+            )
+        if market_context is not None:
+            _warnings.warn(
+                "`market_context=` is deprecated; pass `investor_branch=InvestorBranch(...)` "
+                "with `broad_market=...` instead. This shim will be removed in the next release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.investor_branch = InvestorBranch(
+                self.settings, broad_market=market_context
+            )
+        else:
+            self.investor_branch = investor_branch or InvestorBranch(self.settings)
+
         self.section_extractor = section_extractor or SectionExtractor()
         if section_scorer is None:
             finbert = FinBERTScorer(self.settings)
@@ -144,10 +171,12 @@ class NVDASentimentNode:
     def run(self, request: SentimentRequest) -> SentimentResponse:
         warnings: List[str] = []
 
-        # Honor request.use_cache (§3.1) — adapters support it via attribute.
-        for adapter in (self.sec_adapter, self.ir_adapter, self.market_context):
+        # Honor request.use_cache on document adapters (§3.1).
+        for adapter in (self.sec_adapter, self.ir_adapter):
             if hasattr(adapter, "use_cache"):
                 adapter.use_cache = request.use_cache
+        # Propagate use_cache to every investor sub-adapter too (§6.4).
+        self.investor_branch.set_use_cache(request.use_cache)
 
         # 1. Fetch source metadata
         try:
@@ -211,25 +240,39 @@ class NVDASentimentNode:
 
         guidance_tone, guidance_sources = compute_guidance_tone(document_scores, warnings)
 
-        # 7. Investor context
-        investor_context = 0.0
-        investor_context_available = False
-        if request.include_market_context:
-            try:
-                investor_context, investor_context_available = self.market_context.get_combined_score()
-                if not investor_context_available:
-                    warnings.append("Investor context unavailable; contribution set to 0")
-            except Exception as exc:
-                logger.warning("market context failed: %s", exc)
-                warnings.append("Investor context unavailable; contribution set to 0")
-                investor_context = 0.0
-
-        # 8. Composite score
-        _, final_score_0_100, label = compute_final_score(
-            filing_tone, filing_delta, guidance_tone, investor_context
+        # 7. Leadership component
+        leadership_component = compute_leadership_component(
+            filing_tone, filing_delta, guidance_tone
         )
 
-        # 9. Confidence
+        # 8. Investor branch (§6.6)
+        if request.include_investor_branch:
+            ib = self.investor_branch.run(
+                include_broad_market=request.include_market_context
+            )
+            if not ib.ok:
+                warnings.append("Investor branch unavailable; leadership-only fallback")
+        else:
+            ib = InvestorBranchOutput(
+                sub_scores=[],
+                investor_component=0.0,
+                investor_score=50.0,
+                ok=False,
+            )
+
+        # 9. Combine leadership + investor with divergence adjustment.
+        cmb: CombinerOutput = combine(
+            leadership_component=leadership_component,
+            investor_component=ib.investor_component,
+            alpha=self.settings.combiner_alpha,
+            lambda_neg=self.settings.combiner_lambda_neg,
+            lambda_pos=self.settings.combiner_lambda_pos,
+            investor_branch_ok=ib.ok,
+        )
+
+        # 10. Confidence
+        investor_subsources_ok = sum(1 for s in ib.sub_scores if s.ok)
+        broad_ok = any(s.name == "broad_market" and s.ok for s in ib.sub_scores)
         confidence = compute_confidence(
             fetched_docs=fetched_docs,
             document_scores=document_scores,
@@ -239,43 +282,64 @@ class NVDASentimentNode:
             extraction_successes=extraction_successes,
             finbert_available=self.section_scorer.finbert_available,
             include_market_context=request.include_market_context,
-            investor_context_available=investor_context_available,
+            investor_context_available=broad_ok,
             guidance_tone_source_count=guidance_sources,
             filing_delta_computed=(tone_delta != 0.0 or risk_delta != 0.0),
             yoy_matched=yoy_matched,
+            include_investor_branch=request.include_investor_branch,
+            investor_branch_ok=ib.ok,
+            investor_subsources_ok=investor_subsources_ok,
         )
 
-        # Warn if FinBERT unavailable (§36.3)
         if not self.section_scorer.finbert_available:
             warnings.append("FinBERT unavailable; lexicon-only scoring")
 
-        # 10. Signals
+        # 11. Signals (tiers 6 + 7 live now that the combiner output is available)
         signals = build_signals(
             filing_tone=filing_tone,
             filing_delta=filing_delta,
             tone_delta=tone_delta,
             risk_delta=risk_delta,
             guidance_tone=guidance_tone,
-            investor_context=investor_context,
             document_scores=document_scores,
             section_scores_by_type=section_scores_by_type,
-            include_market_context=request.include_market_context,
+            investor_component=ib.investor_component,
+            divergence=cmb.divergence,
+            include_investor_branch=request.include_investor_branch and ib.ok,
         )
 
         coverage = _build_source_coverage(fetched_docs)
 
+        combined_rounded = round(cmb.combined_score, 1)
+        leadership_rounded = round(cmb.leadership_score, 1)
+        investor_rounded = round(cmb.investor_score, 1)
+        divergence_rounded = round(cmb.divergence, 1)
+        label = map_score_to_label(combined_rounded)
+
+        components = {
+            "filing_tone": round(filing_tone, 3),
+            "filing_delta": round(filing_delta, 3),
+            "guidance_tone": round(guidance_tone, 3),
+            "options_flow": _get_sub(ib, "options_flow"),
+            "short_interest": _get_sub(ib, "short_interest"),
+            "analyst_signal": _get_sub(ib, "analyst_signal"),
+            "social": _get_sub(ib, "social"),
+            "broad_market": _get_sub(ib, "broad_market"),
+            "leadership_component": round(leadership_component, 3),
+            "investor_component": round(ib.investor_component, 3),
+        }
+
         return SentimentResponse(
             ticker=request.ticker,
             as_of_date=request.as_of_date,
-            market_sentiment_score=round(final_score_0_100, 1),
+            market_sentiment_score=combined_rounded,
+            leadership_score=leadership_rounded,
+            investor_score=investor_rounded,
+            combined_score=combined_rounded,
+            divergence=divergence_rounded,
             label=label,
             confidence=round(confidence, 2),
-            components={
-                "filing_tone": round(filing_tone, 3),
-                "filing_delta": round(filing_delta, 3),
-                "guidance_tone": round(guidance_tone, 3),
-                "investor_context": round(investor_context, 3),
-            },
+            components=components,
             signals=signals,
             source_coverage=coverage,
             metadata={
@@ -292,13 +356,23 @@ class NVDASentimentNode:
             ticker=request.ticker,
             as_of_date=request.as_of_date,
             market_sentiment_score=50.0,
+            leadership_score=50.0,
+            investor_score=50.0,
+            combined_score=50.0,
+            divergence=0.0,
             label="neutral",
             confidence=0.10,
             components={
                 "filing_tone": 0.0,
                 "filing_delta": 0.0,
                 "guidance_tone": 0.0,
-                "investor_context": 0.0,
+                "options_flow": 0.0,
+                "short_interest": 0.0,
+                "analyst_signal": 0.0,
+                "social": 0.0,
+                "broad_market": 0.0,
+                "leadership_component": 0.0,
+                "investor_component": 0.0,
             },
             signals=[
                 "Management tone is broadly balanced across recent official materials",
@@ -316,7 +390,7 @@ class NVDASentimentNode:
 
 
 # --------------------------------------------------------------------------- #
-# Typer CLI (§43)
+# Typer CLI (§43, §6.7)
 # --------------------------------------------------------------------------- #
 
 cli = typer.Typer(add_completion=False, help="NVIDIA Sentiment Node MVP")
@@ -330,8 +404,10 @@ def run_command(
         help="ISO date YYYY-MM-DD",
     ),
     lookback_quarters: int = typer.Option(4, "--lookback-quarters", min=1, max=8),
-    include_market_context: bool = typer.Option(True, "--include-market-context"),
-    use_cache: bool = typer.Option(True, "--use-cache"),
+    include_market_context: bool = typer.Option(True, "--include-market-context/--no-market-context"),
+    include_investor_branch: bool = typer.Option(True, "--include-investor-branch/--no-investor-branch"),
+    show_sub_components: bool = typer.Option(False, "--show-sub-components"),
+    use_cache: bool = typer.Option(True, "--use-cache/--no-cache"),
 ) -> None:
     """Run the sentiment node and print the JSON response."""
     request = SentimentRequest(
@@ -339,11 +415,21 @@ def run_command(
         as_of_date=date.fromisoformat(as_of_date),
         lookback_quarters=lookback_quarters,
         include_market_context=include_market_context,
+        include_investor_branch=include_investor_branch,
         use_cache=use_cache,
     )
     node = NVDASentimentNode()
     response = node.run(request)
-    print(response.model_dump_json(indent=2))
+
+    if show_sub_components:
+        sub_keys = ("options_flow", "short_interest", "analyst_signal", "social", "broad_market")
+        typer.echo("Investor sub-components:")
+        for key in sub_keys:
+            val = response.components.get(key, 0.0)
+            typer.echo(f"  {key:16s}  {val:+.3f}")
+        typer.echo("")
+
+    typer.echo(response.model_dump_json(indent=2))
 
 
 def main() -> None:

@@ -5,7 +5,12 @@ from typing import List
 
 from nvda_sentiment.config import Settings
 from nvda_sentiment.node import NVDASentimentNode
-from nvda_sentiment.schemas import SentimentRequest, SourceDocument
+from nvda_sentiment.schemas import (
+    InvestorBranchOutput,
+    InvestorSubScore,
+    SentimentRequest,
+    SourceDocument,
+)
 
 
 _POSITIVE_MDA = """Item 2. Management's Discussion and Analysis
@@ -56,13 +61,24 @@ class FakeIR:
         return self._html_map[doc.url]
 
 
-class FakeMarket:
-    def __init__(self, score=0.1, ok=True):
-        self._score = score
-        self._ok = ok
+class FakeInvestorBranch:
+    """Stub investor branch — no network, deterministic, leadership-only by default."""
 
-    def get_combined_score(self):
-        return (self._score, self._ok)
+    def __init__(self, *, ok=False, investor_component=0.0, subs=None):
+        self._ok = ok
+        self._comp = investor_component
+        self._subs = list(subs) if subs is not None else []
+
+    def set_use_cache(self, use_cache):  # pragma: no cover — trivial
+        return None
+
+    def run(self, *, include_broad_market):
+        return InvestorBranchOutput(
+            sub_scores=list(self._subs),
+            investor_component=self._comp,
+            investor_score=50.0 + 50.0 * max(-1.0, min(1.0, self._comp)),
+            ok=self._ok,
+        )
 
 
 def _positive_node(tmp_path):
@@ -79,7 +95,8 @@ def _positive_node(tmp_path):
         settings=settings,
         sec_adapter=FakeSEC(docs, html_map),
         ir_adapter=FakeIR([], {}),
-        market_context=FakeMarket(score=0.2, ok=True),
+        # §6.2.5 — investor branch stubbed inert at this step; leadership only.
+        investor_branch=FakeInvestorBranch(ok=False),
     )
 
 
@@ -97,7 +114,7 @@ def _negative_node(tmp_path):
         settings=settings,
         sec_adapter=FakeSEC(docs, html_map),
         ir_adapter=FakeIR([], {}),
-        market_context=FakeMarket(score=-0.2, ok=True),
+        investor_branch=FakeInvestorBranch(ok=False),
     )
 
 
@@ -122,7 +139,7 @@ def test_no_sources_returns_neutral_floor(tmp_path):
         settings=settings,
         sec_adapter=FakeSEC([], {}),
         ir_adapter=FakeIR([], {}),
-        market_context=FakeMarket(score=0.0, ok=False),
+        investor_branch=FakeInvestorBranch(ok=False),
     )
     resp = node.run(SentimentRequest(as_of_date=date(2026, 4, 20)))
     assert resp.market_sentiment_score == 50.0

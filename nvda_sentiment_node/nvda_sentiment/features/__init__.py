@@ -6,6 +6,8 @@ from .filing_delta import (
 )
 from .confidence import compute_confidence
 from .signal_builder import build_signals
+from .investor_branch import InvestorBranch
+from .combiner import CombinerOutput, combine
 
 __all__ = [
     "nvda_fiscal_bucket",
@@ -14,4 +16,7 @@ __all__ = [
     "compute_filing_delta",
     "compute_confidence",
     "build_signals",
+    "InvestorBranch",
+    "CombinerOutput",
+    "combine",
 ]

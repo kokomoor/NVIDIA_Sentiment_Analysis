@@ -82,6 +82,32 @@ FINAL_COMPONENT_WEIGHTS = {
     "investor_context": 0.10,
 }
 
+# Leadership branch weights (renormalized from old 0.50/0.25/0.15 = 0.90).
+LEADERSHIP_COMPONENT_WEIGHTS = {
+    "filing_tone":   0.50 / 0.90,    # 0.5556
+    "filing_delta":  0.25 / 0.90,    # 0.2778
+    "guidance_tone": 0.15 / 0.90,    # 0.1667
+}
+assert abs(sum(LEADERSHIP_COMPONENT_WEIGHTS.values()) - 1.0) < 1e-6
+
+# Investor branch weights (§7, Appendix C).
+INVESTOR_COMPONENT_WEIGHTS = {
+    "options_flow":   0.30,
+    "short_interest": 0.15,
+    "analyst_signal": 0.25,
+    "social":         0.15,
+    "broad_market":   0.15,
+}
+assert abs(sum(INVESTOR_COMPONENT_WEIGHTS.values()) - 1.0) < 1e-6
+
+# Combiner weights (§7.2).
+COMBINER_DEFAULTS = {
+    "alpha":          0.55,    # leadership weight in base blend
+    "lambda_neg":     0.25,    # bearish-divergence penalty magnitude (L>I)
+    "lambda_pos":     0.10,    # contrarian premium magnitude (I>L)
+    "agreement_zero": True,    # when signs agree, divergence adjustment = 0
+}
+
 
 # --------------------------------------------------------------------------- #
 # 8-K filter keywords (§13.6)
@@ -116,7 +142,12 @@ class Settings:
     guidance_tone_weight: float = FINAL_COMPONENT_WEIGHTS["guidance_tone"]
     investor_context_weight: float = FINAL_COMPONENT_WEIGHTS["investor_context"]
 
-    node_version: str = "0.1.0"
+    # Combiner overrides (§6.1.3, §7.3).
+    combiner_alpha:      float = COMBINER_DEFAULTS["alpha"]
+    combiner_lambda_neg: float = COMBINER_DEFAULTS["lambda_neg"]
+    combiner_lambda_pos: float = COMBINER_DEFAULTS["lambda_pos"]
+
+    node_version: str = "0.2.0"
 
     def __post_init__(self) -> None:
         # Ensure cache dir is a Path and exists (§38.2)

@@ -88,6 +88,94 @@ These collapse to a single 0–100 score, a label (`bearish` → `strongly bulli
 and a `confidence` in `[0.10, 0.95]` driven by source coverage, extraction
 success rate, and whether the YoY comparison actually matched.
 
+### How the score is built
+
+From raw HTML to the final 0–100 number, five stages.
+
+**1. Scrape.** Stock Python — no scraping frameworks.
+
+- `requests` pulls raw HTML/JSON.
+- `BeautifulSoup` + `lxml` strip tags and normalize whitespace.
+- `parsers/section_extractor.py` uses plain regex on heading markers
+  (*"Item 2. Management's Discussion and Analysis"*, *"Outlook"*, *"Q&A"*,
+  etc.) to carve each document into named sections. A 10-Q comes out as
+  `{"mda": "...", "outlook_guidance": "...", "risk_factors": "..."}`.
+
+**2. Score each section with two scorers in parallel.** Both run on every
+section and are averaged 50/50. We do all scoring ourselves — no external
+sentiment API.
+
+| Scorer | What it does | Output |
+|---|---|---|
+| **FinBERT** (`scorers/finbert_scorer.py`) | Neural model, runs locally. For each sentence returns `P(pos)`, `P(neg)`, `P(neutral)`. We take `P(pos) − P(neg)` and average across the section. | `[-1, +1]` |
+| **Lexicon** (`scorers/lexicon.py`) | Handcrafted finance-word dictionary split into positive, negative, uncertainty, and litigious buckets. Count hits, normalize by word count, compute positive-vs-negative ratio. | `[-1, +1]` |
+
+Why both? FinBERT is the smart one but it's a 2019 model trained on ~5K
+labeled sentences — it has blind spots on newer vocabulary. The lexicon is
+dumb but it's a sanity check that won't silently drift. Averaging gives you
+robustness without trusting either one completely.
+
+Separately, if the lexicon's uncertainty/litigious buckets dominate, we
+shave a small amount off — lots of *"may"*, *"could"*, *"subject to"* means
+management is hedging.
+
+```
+section_score = 0.5 · FinBERT + 0.5 · Lexicon − uncertainty_penalty
+```
+
+**3. Climb the aggregation ladder.**
+
+```
+sentences  →  sections  →  documents  →  components  →  final 0-100
+```
+
+- **Sentences → section:** average inside FinBERT; normalized ratio inside lexicon.
+- **Sections → document:** each document type has its own weights
+  (`config.py`). A 10-Q is 70% MD&A + 30% outlook. A transcript is 70%
+  prepared remarks + 30% Q&A. A press release is 40% headline + 35%
+  financials + 25% outlook. Risk-factors sections are extracted but
+  deliberately *excluded* at this step — they'd tank every score.
+- **Documents → four components:** same docs, four *different views*. The
+  four components (`filing_tone`, `filing_delta`, `guidance_tone`,
+  `investor_context`) are listed under **What it outputs** above. The key
+  idea is that each view answers a different question: absolute tone now,
+  *change* since last year, forward-looking language in isolation, and
+  where broader investor appetite sits.
+
+**4. Collapse to one number.**
+
+```
+raw   = 0.50·filing_tone + 0.25·filing_delta + 0.15·guidance_tone + 0.10·investor_context
+score = 50 + 50 · clip(raw, -1, +1)          # [-1, +1] → [0, 100]
+```
+
+Bucket into a label (`<35` bearish, `<45` mildly bearish, `<55` neutral,
+`<65` mildly bullish, `<80` bullish, else strongly bullish) and emit
+plain-English signals by checking which components moved the needle.
+
+**5. Worked example.** Current 10-Q MD&A section:
+
+- FinBERT: `P(pos)=0.65, P(neg)=0.15, P(neutral)=0.20` → **+0.50**
+- Lexicon: 12 positive hits, 3 negative hits / 100 words → **+0.30**
+- Uncertainty penalty: **−0.02**
+
+Section score: `0.5(0.50) + 0.5(0.30) − 0.02 = +0.38`.
+
+Outlook section scores +0.20 the same way. Document score:
+`0.70(0.38) + 0.30(0.20) = +0.32`.
+
+Do that for every doc, weight by document type, you get `filing_tone = +0.29`.
+Last year's same-quarter 10-Q gave +0.21, so `tone_delta = +0.08`. And so on
+for the other components.
+
+```
+raw   = 0.50(0.29) + 0.25(0.08) + 0.15(0.19) + 0.10(0.06) = +0.200
+score = 50 + 50(0.200) = 60.0  →  "mildly bullish"
+```
+
+The full formulas and edge cases (fiscal-calendar math, confidence arithmetic,
+determinism guarantees) live in **Part 4 — Technical Deep-Dive**.
+
 ### What it is *not*
 
 - Not a price predictor. It scores language, not returns.

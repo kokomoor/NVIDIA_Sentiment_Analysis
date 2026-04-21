@@ -9,6 +9,7 @@ from ..config import (
     DOCUMENT_TYPE_WEIGHTS,
     EIGHT_K_SECTION_WEIGHTS,
     FILING_SECTION_WEIGHTS,
+    LEADERSHIP_COMPONENT_WEIGHTS,
     PRESS_RELEASE_SECTION_WEIGHTS,
     TRANSCRIPT_SECTION_WEIGHTS,
 )
@@ -126,25 +127,30 @@ def compute_guidance_tone(
 
 
 # --------------------------------------------------------------------------- #
-# Composite (§27)
+# Leadership composite (§6.2.2)
 # --------------------------------------------------------------------------- #
 
-def compute_final_score(
+def compute_leadership_component(
     filing_tone: float,
     filing_delta: float,
     guidance_tone: float,
-    investor_context: float,
-) -> Tuple[float, float, str]:
+) -> float:
+    """Leadership branch component in [-1, +1] (LEADERSHIP_COMPONENT_WEIGHTS)."""
+    w = LEADERSHIP_COMPONENT_WEIGHTS
     raw = (
-        0.50 * filing_tone
-        + 0.25 * filing_delta
-        + 0.15 * guidance_tone
-        + 0.10 * investor_context
+        w["filing_tone"] * filing_tone
+        + w["filing_delta"] * filing_delta
+        + w["guidance_tone"] * guidance_tone
     )
-    raw = clip(raw, -1.0, 1.0)
-    score_0_100 = 50.0 + 50.0 * raw
-    score_0_100 = max(0.0, min(100.0, score_0_100))
-    return raw, score_0_100, map_score_to_label(score_0_100)
+    return clip(raw, -1.0, 1.0)
+
+
+def score_to_0_100_and_label(component: float) -> Tuple[float, str]:
+    """Map a [-1, +1] component to 0-100 and its qualitative label."""
+    clipped = clip(component, -1.0, 1.0)
+    score = 50.0 + 50.0 * clipped
+    score = max(0.0, min(100.0, score))
+    return score, map_score_to_label(score)
 
 
 def map_score_to_label(score_0_100: float) -> str:

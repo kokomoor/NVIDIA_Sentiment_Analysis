@@ -2,12 +2,14 @@
 
 import pytest
 
+from nvda_sentiment.config import LEADERSHIP_COMPONENT_WEIGHTS
 from nvda_sentiment.scorers.composite import (
     clip,
     compute_filing_tone,
-    compute_final_score,
+    compute_leadership_component,
     map_score_to_label,
     renormalize_weights,
+    score_to_0_100_and_label,
 )
 from nvda_sentiment.schemas import DocumentScore, SectionScore
 
@@ -24,20 +26,34 @@ def test_renormalize_weights_drops_missing():
     assert out == {"a": 1.0}
 
 
-def test_final_score_transform():
-    raw, score, label = compute_final_score(0.32, 0.10, 0.25, 0.05)
-    # 0.50*0.32 + 0.25*0.10 + 0.15*0.25 + 0.10*0.05 = 0.2275
-    assert raw == pytest.approx(0.2275)
-    assert score == pytest.approx(61.375)
-    assert label == "mildly bullish"
+def test_leadership_component_uses_renormalized_weights():
+    # Inputs chosen to verify the renormalized weights (0.50/0.90 etc.)
+    comp = compute_leadership_component(0.32, 0.10, 0.25)
+    w = LEADERSHIP_COMPONENT_WEIGHTS
+    expected = w["filing_tone"] * 0.32 + w["filing_delta"] * 0.10 + w["guidance_tone"] * 0.25
+    assert comp == pytest.approx(expected)
 
 
-def test_final_score_clipping():
-    # Any input > 1 in raw should not happen, but map must stay in [0,100]
-    _, score, _ = compute_final_score(1.0, 1.0, 1.0, 1.0)
-    assert score == 100.0
-    _, score, _ = compute_final_score(-1.0, -1.0, -1.0, -1.0)
-    assert score == 0.0
+def test_leadership_weights_sum_to_one():
+    assert sum(LEADERSHIP_COMPONENT_WEIGHTS.values()) == pytest.approx(1.0)
+
+
+def test_score_to_0_100_monotonic_and_clipped():
+    score_lo, _ = score_to_0_100_and_label(-2.0)   # outside -1
+    score_hi, _ = score_to_0_100_and_label(2.0)    # outside +1
+    assert score_lo == 0.0
+    assert score_hi == 100.0
+    mid_score, mid_label = score_to_0_100_and_label(0.0)
+    assert mid_score == 50.0
+    assert mid_label == "neutral"
+
+
+def test_leadership_component_clipped_even_with_large_input():
+    # Saturate every sub-input; result still in [-1, 1].
+    comp = compute_leadership_component(1.0, 1.0, 1.0)
+    assert comp == pytest.approx(1.0)
+    comp = compute_leadership_component(-1.0, -1.0, -1.0)
+    assert comp == pytest.approx(-1.0)
 
 
 def test_label_mapping_boundaries():

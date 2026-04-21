@@ -1,4 +1,4 @@
-"""AAII + VIX small context layer (§15)."""
+"""AAII + VIX broad-market investor sub-signal (§3.5, §6.3.5)."""
 
 from __future__ import annotations
 
@@ -10,9 +10,10 @@ from typing import Tuple
 import requests
 from bs4 import BeautifulSoup
 
-from ..config import AAII_URL, FRED_VIX_CSV_URL, Settings
-from ..utils.cache import SimpleCache
-from ..utils.logging import get_logger
+from ...config import AAII_URL, FRED_VIX_CSV_URL, Settings
+from ...schemas import InvestorSubScore
+from ...utils.cache import SimpleCache
+from ...utils.logging import get_logger
 
 
 logger = get_logger(__name__)
@@ -23,7 +24,7 @@ def _clip(v: float, low: float = -1.0, high: float = 1.0) -> float:
     return max(low, min(high, v))
 
 
-class MarketContextAdapter:
+class BroadMarketAdapter:
     def __init__(
         self,
         settings: Settings,
@@ -151,3 +152,22 @@ class MarketContextAdapter:
         vix, vix_ok = self.get_vix_score()
         combined = 0.6 * aaii + 0.4 * vix
         return (_clip(combined, -1.0, 1.0), (aaii_ok or vix_ok))
+
+    # --- Unified signal shape (§6.3.5) --------------------------------------
+
+    def get_signal(self) -> InvestorSubScore:
+        """Produce the ``InvestorSubScore`` used by the investor branch."""
+        aaii_raw, aaii_ok = self.get_aaii_score()
+        vix_raw, vix_ok = self.get_vix_score()
+        combined = 0.6 * aaii_raw + 0.4 * vix_raw
+        score = _clip(combined, -1.0, 1.0)
+        ok = aaii_ok or vix_ok
+        return InvestorSubScore(
+            name="broad_market",
+            score=score if ok else 0.0,
+            ok=ok,
+            detail={
+                "aaii": aaii_raw if aaii_ok else None,
+                "vix": vix_raw if vix_ok else None,
+            },
+        )

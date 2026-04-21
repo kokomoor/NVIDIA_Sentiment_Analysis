@@ -1,5 +1,13 @@
-from .sec_api import SECAdapter
+from .investor.broad_market import BroadMarketAdapter
 from .nvidia_ir import NvidiaIRAdapter
-from .market_context import MarketContextAdapter
+from .sec_api import SECAdapter
 
-__all__ = ["SECAdapter", "NvidiaIRAdapter", "MarketContextAdapter"]
+# Deprecated alias (§6.2.1). Remove in next release.
+MarketContextAdapter = BroadMarketAdapter
+
+__all__ = [
+    "SECAdapter",
+    "NvidiaIRAdapter",
+    "BroadMarketAdapter",
+    "MarketContextAdapter",
+]
